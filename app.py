@@ -16,7 +16,6 @@ from flask import (
     redirect,
     url_for,
     render_template,
-    jsonify,
     Response,
 )
 
@@ -64,7 +63,7 @@ def column_exists(conn, table, column):
 
 
 def generate_token():
-    return "cw_" + secrets.token_urlsafe(32)
+    return "cw_" + secrets.token_urlsafe(16)
 
 
 def init_db():
@@ -101,11 +100,9 @@ def init_db():
             except Exception:
                 pass
 
-    users = conn.execute("SELECT id FROM users WHERE sub_token IS NULL OR sub_token = ''").fetchall()
+    users = conn.execute("SELECT id, sub_token FROM users WHERE sub_token IS NULL OR sub_token = ''").fetchall()
     for user in users:
         token = generate_token()
-        while conn.execute("SELECT 1 FROM users WHERE sub_token = ?", (token,)).fetchone():
-            token = generate_token()
         conn.execute("UPDATE users SET sub_token = ? WHERE id = ?", (token, user["id"]))
 
     conn.commit()
@@ -141,8 +138,11 @@ def parse_date(value):
     if not value:
         return None
     try:
-        value = str(value).replace("Z", "+00:00")
-        return datetime.fromisoformat(value)
+        val_str = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(val_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         return None
 
@@ -167,8 +167,6 @@ def days_left(expires_at):
     dt = parse_date(expires_at)
     if not dt:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
     seconds = (dt - now_utc()).total_seconds()
     return max(0, int(seconds // 86400))
 
@@ -179,8 +177,6 @@ def hours_left(expires_at):
     dt = parse_date(expires_at)
     if not dt:
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
     seconds = (dt - now_utc()).total_seconds()
     return max(0, int(seconds // 3600))
 
@@ -195,81 +191,27 @@ def format_expiry(expires_at):
 
 
 # =========================================================
-# XRAY STATS & SAFE CALLS
+# USER USAGE & LIMITS
 # =========================================================
 
-def xray_stats():
-    if not os.path.exists(XRAY_PATH):
-        return {}
-    try:
-        result = subprocess.run(
-            [XRAY_PATH, "api", "statsquery", "--server=" + XRAY_API],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode != 0:
-            return {}
-        data = json.loads(result.stdout)
-        output = {}
-        for item in data.get("stat", []):
-            name = item.get("name")
-            try:
-                output[name] = int(item.get("value", 0))
-            except Exception:
-                output[name] = 0
-        return output
-    except Exception:
-        return {}
-
-
-def get_user_xray_total(user):
-    stats = xray_stats()
-    email = f"user-{user['id']}"
-    uplink = int(stats.get(f"user>>>{email}>>>traffic>>>uplink", 0))
-    downlink = int(stats.get(f"user>>>{email}>>>traffic>>>downlink", 0))
-    return uplink + downlink
-
-
-def sync_user_usage(user_id):
-    try:
-        conn = db()
-        user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        if not user:
-            conn.close()
-            return None
-
-        current = get_user_xray_total(user)
-        previous_base = int(user["xray_base"] or 0)
-        used = int(user["used_bytes"] or 0)
-
-        delta = current - previous_base if current >= previous_base else current
-        used += max(delta, 0)
-
-        conn.execute(
-            "UPDATE users SET used_bytes = ?, xray_base = ? WHERE id = ?",
-            (used, current, user_id)
-        )
-        conn.commit()
-        updated = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        conn.close()
-        return updated
-    except Exception:
-        return None
-
-
 def user_should_be_disabled(user):
+    # اگر کاربر توسط ادمین خاموش شده باشه
+    if int(user["active"] or 0) == 0:
+        return True
+
     used = int(user["used_bytes"] or 0)
     limit = int(user["limit_bytes"] or 0)
+    
+    # اتمام حجم
     if limit > 0 and used >= limit:
         return True
+
+    # اتمام زمان
     if user["expires_at"]:
         dt = parse_date(user["expires_at"])
-        if dt:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            if dt <= now_utc():
-                return True
+        if dt and dt <= now_utc():
+            return True
+
     return False
 
 
@@ -277,18 +219,13 @@ def check_limits():
     try:
         conn = db()
         users = conn.execute("SELECT * FROM users WHERE active = 1").fetchall()
-        changed = False
         for user in users:
-            updated = sync_user_usage(user["id"])
-            if updated and user_should_be_disabled(updated):
-                conn.execute("UPDATE users SET active = 0 WHERE id = ?", (updated["id"],))
-                changed = True
+            if user_should_be_disabled(user):
+                conn.execute("UPDATE users SET active = 0 WHERE id = ?", (user["id"],))
         conn.commit()
         conn.close()
-        if changed:
-            rebuild_xray_config()
     except Exception as e:
-        print(f"Limit check warning: {e}")
+        print(f"Check limits warning: {e}")
 
 
 def build_xray_config():
@@ -300,9 +237,6 @@ def build_xray_config():
         clients = [{"id": u["uuid"], "level": 0, "email": f"user-{u['id']}"} for u in users]
         config = {
             "log": {"loglevel": "warning"},
-            "api": {"tag": "api", "services": ["StatsService"]},
-            "stats": {},
-            "policy": {"levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True}}},
             "inbounds": [
                 {
                     "listen": "127.0.0.1",
@@ -310,17 +244,9 @@ def build_xray_config():
                     "protocol": "vless",
                     "settings": {"clients": clients, "decryption": "none"},
                     "streamSettings": {"network": "ws", "security": "none", "wsSettings": {"path": WS_PATH}}
-                },
-                {
-                    "listen": "127.0.0.1",
-                    "port": 10085,
-                    "protocol": "dokodemo-door",
-                    "settings": {"address": "127.0.0.1"},
-                    "tag": "api"
                 }
             ],
-            "routing": {"rules": [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]},
-            "outbounds": [{"protocol": "freedom", "tag": "direct"}, {"protocol": "blackhole", "tag": "block"}]
+            "outbounds": [{"protocol": "freedom", "tag": "direct"}]
         }
         with open(XRAY_CONFIG, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
@@ -333,21 +259,14 @@ def restart_xray():
     if not os.path.exists(XRAY_PATH):
         return
     try:
-        subprocess.run(["pkill", "-f", XRAY_PATH], capture_output=True, timeout=5)
+        subprocess.run(["pkill", "-f", XRAY_PATH], capture_output=True, timeout=3)
+        subprocess.Popen([XRAY_PATH, "run", "-config", XRAY_CONFIG], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
-    try:
-        subprocess.Popen([XRAY_PATH, "run", "-config", XRAY_CONFIG], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        print("Xray run warning:", e)
-
-
-def rebuild_xray_config():
-    build_xray_config()
 
 
 # =========================================================
-# SUBSCRIPTION & LINKS
+# LINK GENERATOR
 # =========================================================
 
 def public_host():
@@ -359,11 +278,12 @@ def make_vless_link(user):
     host = public_host()
     name = quote(str(user["name"]), safe="")
     path = quote(WS_PATH, safe="")
-    return f"vless://{user['uuid']}@{host}:443?encryption=none&security=tls&type=ws&host={quote(host, safe='')}&path={path}#{name}"
+    # لینک استاندارد VLESS WS TLS به همراه SNI
+    return f"vless://{user['uuid']}@{host}:443?security=tls&encryption=none&type=ws&host={quote(host, safe='')}&sni={quote(host, safe='')}&path={path}#{name}"
 
 
 # =========================================================
-# ROUTES
+# WEB ROUTES
 # =========================================================
 
 @app.route("/")
@@ -519,7 +439,7 @@ def edit_user(user_id):
             pass
 
     conn.execute(
-        "UPDATE users SET name = ?, limit_bytes = ?, expires_at = ? WHERE id = ?",
+        "UPDATE users SET name = ?, limit_bytes = ?, expires_at = ?, active = 1 WHERE id = ?",
         (name or user["name"], gb_to_bytes(limit_val), expires_at, user_id)
     )
     conn.commit()
@@ -569,7 +489,7 @@ def reset_usage(user_id):
         return guard
 
     conn = db()
-    conn.execute("UPDATE users SET used_bytes = 0, xray_base = 0 WHERE id = ?", (user_id,))
+    conn.execute("UPDATE users SET used_bytes = 0, xray_base = 0, active = 1 WHERE id = ?", (user_id,))
     conn.commit()
     conn.close()
 
@@ -577,21 +497,45 @@ def reset_usage(user_id):
 
 
 # =========================================================
-# CLIENT SUBSCRIPTION LINKS
+# SUBSCRIPTION LINK (Standard v2ray format)
 # =========================================================
 
 @app.route("/sub/<token>")
 def subscription(token):
+    token = str(token).strip()
     conn = db()
-    user = conn.execute("SELECT * FROM users WHERE sub_token = ? AND active = 1", (token,)).fetchone()
+    user = conn.execute("SELECT * FROM users WHERE sub_token = ?", (token,)).fetchone()
     conn.close()
 
-    if not user or user_should_be_disabled(user):
-        return Response("User Disabled or Expired", status=403, mimetype="text/plain")
+    if not user:
+        return Response("User Not Found", status=404, mimetype="text/plain; charset=utf-8")
 
-    vless_link = make_vless_link(user)
-    b64_link = base64.b64encode(vless_link.encode("utf-8")).decode("utf-8")
-    return Response(b64_link, mimetype="text/plain")
+    if user_should_be_disabled(user):
+        return Response("User Disabled or Expired", status=403, mimetype="text/plain; charset=utf-8")
+
+    # ساخت لینک VLESS
+    vless_config = make_vless_link(user)
+    
+    # انکود Base64 استاندارد برای کلاینت‌ها
+    encoded_sub = base64.b64encode(vless_config.encode("utf-8")).decode("utf-8")
+
+    used = int(user["used_bytes"] or 0)
+    limit = int(user["limit_bytes"] or 0)
+    
+    expire_timestamp = 0
+    if user["expires_at"]:
+        dt = parse_date(user["expires_at"])
+        if dt:
+            expire_timestamp = int(dt.timestamp())
+
+    # هدر رسمی کلاینت‌های V2Ray برای نشان دادن حجم و زمان
+    headers = {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Subscription-Userinfo": f"upload=0; download={used}; total={limit}; expire={expire_timestamp}",
+        "Profile-Update-Interval": "6"
+    }
+
+    return Response(encoded_sub, status=200, headers=headers)
 
 
 @app.route("/portal/<token>")
