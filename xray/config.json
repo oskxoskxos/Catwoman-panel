@@ -4,7 +4,7 @@
   },
   "inbounds": [
     {
-      "listen": "0.0.0.0",
+      "listen": "127.0.0.1",
       "port": 10000,
       "protocol": "vless",
       "settings": {
@@ -16,14 +16,16 @@
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "tcp"
+        "network": "ws",
+        "wsSettings": {
+          "path": "/xray-ws"
+        }
       }
     }
   ],
   "outbounds": [
     {
-      "protocol": "freedom",
-      "settings": {}
+      "protocol": "freedom"
     }
   ]
 }
