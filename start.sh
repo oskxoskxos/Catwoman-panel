@@ -6,7 +6,7 @@ python /app/init_xray.py
 
 echo "Starting Xray..."
 
- /usr/local/bin/xray/xray run \
+/usr/local/bin/xray/xray run \
     -config /app/xray/config.json &
 
 XRAY_PID=$!
