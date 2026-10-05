@@ -2,7 +2,7 @@
 
 echo "Starting Xray..."
 
-xray run -config /app/xray/config.json &
+/usr/local/bin/xray/xray run -config /app/xray/config.json &
 
 echo "Starting Flask..."
 
