@@ -31,7 +31,10 @@
 
         <nav>
 
-            <a href="/dashboard" class="active">
+            <a
+                href="/dashboard"
+                class="active"
+            >
                 🏠 داشبورد
             </a>
 
@@ -52,136 +55,288 @@
 
         <div class="topbar">
 
-            <h1>
-                داشبورد
-            </h1>
+            <div>
 
-            <p>
-                خوش آمدی {{ username }}
-            </p>
+                <h1>
+                    مدیریت کاربران
+                </h1>
 
-        </div>
-
-
-        <div class="cards">
-
-            <div class="card">
-
-                <span class="card-title">
-                    وضعیت پنل
-                </span>
-
-                <strong class="online">
-                    آنلاین
-                </strong>
-
-            </div>
-
-
-            <div class="card">
-
-                <span class="card-title">
-                    وضعیت Xray
-                </span>
-
-                <strong class="online">
-                    فعال
-                </strong>
-
-            </div>
-
-
-            <div class="card">
-
-                <span class="card-title">
-                    کانفیگ‌ها
-                </span>
-
-                <strong>
-                    1
-                </strong>
+                <p>
+                    مدیریت حجم، زمان و کانفیگ‌ها
+                </p>
 
             </div>
 
         </div>
 
+
+        <!-- CREATE USER -->
 
         <div class="section">
 
             <h2>
-                ساخت کانفیگ
+                ساخت کاربر جدید
             </h2>
 
-            <p style="color:#858d9f;">
-                کانفیگ VLESS را برای اتصال تولید کن.
-            </p>
-
-            <button
-                onclick="generateConfig()"
-                style="margin-top:15px;"
-            >
-                ساخت کانفیگ
-            </button>
-
-
-            <div
-                id="configBox"
-                style="display:none; margin-top:20px;"
+            <form
+                method="POST"
+                action="/users/create"
+                style="
+                    display:grid;
+                    gap:12px;
+                    margin-top:20px;
+                "
             >
 
-                <textarea
-                    id="config"
-                    readonly
-                    style="
-                        width:100%;
-                        min-height:120px;
-                        padding:15px;
-                        border-radius:10px;
-                        background:#10131a;
-                        border:1px solid #303645;
-                        color:white;
-                        resize:vertical;
-                        direction:ltr;
-                    "
-                ></textarea>
-
-
-                <button
-                    onclick="copyConfig()"
-                    style="margin-top:12px;"
+                <input
+                    type="text"
+                    name="name"
+                    placeholder="نام کاربر"
+                    required
                 >
-                    کپی کانفیگ
+
+                <input
+                    type="number"
+                    name="volume"
+                    placeholder="حجم به GB"
+                    min="1"
+                    step="0.1"
+                    value="10"
+                    required
+                >
+
+                <input
+                    type="number"
+                    name="days"
+                    placeholder="تعداد روز"
+                    min="1"
+                    value="30"
+                    required
+                >
+
+                <button type="submit">
+                    ➕ ساخت کاربر
                 </button>
 
-            </div>
+            </form>
 
         </div>
 
 
-        <div class="section" style="margin-top:20px;">
+        <!-- USERS -->
+
+        <div class="section">
 
             <h2>
-                وضعیت سرویس
+                کاربران
             </h2>
 
-            <div class="status-box">
 
-                <div class="status-dot"></div>
+            {% if users %}
 
-                <div>
+            <div
+                style="
+                    overflow-x:auto;
+                    margin-top:20px;
+                "
+            >
 
-                    <strong>
-                        Xray فعال است
-                    </strong>
+                <table
+                    style="
+                        width:100%;
+                        border-collapse:collapse;
+                        min-width:850px;
+                    "
+                >
 
-                    <p>
-                        WebSocket endpoint:
-                        /xray-ws
-                    </p>
+                    <thead>
 
-                </div>
+                    <tr>
+
+                        <th>نام</th>
+
+                        <th>وضعیت</th>
+
+                        <th>مصرف</th>
+
+                        <th>حجم</th>
+
+                        <th>تاریخ انقضا</th>
+
+                        <th>عملیات</th>
+
+                    </tr>
+
+                    </thead>
+
+
+                    <tbody>
+
+                    {% for user in users %}
+
+                    {% set used_gb =
+                        user.used_bytes /
+                        1024 /
+                        1024 /
+                        1024
+                    %}
+
+                    {% set limit_gb =
+                        user.limit_bytes /
+                        1024 /
+                        1024 /
+                        1024
+                    %}
+
+                    <tr>
+
+                        <td>
+
+                            <strong>
+                                {{ user.name }}
+                            </strong>
+
+                            <br>
+
+                            <small>
+                                {{ user.uuid }}
+                            </small>
+
+                        </td>
+
+
+                        <td>
+
+                            {% if user.active %}
+
+                                <span class="online">
+                                    فعال
+                                </span>
+
+                            {% else %}
+
+                                <span style="color:#ff5f5f;">
+                                    غیرفعال
+                                </span>
+
+                            {% endif %}
+
+                        </td>
+
+
+                        <td>
+
+                            {{ "%.2f"|format(used_gb) }}
+                            GB
+
+                        </td>
+
+
+                        <td>
+
+                            {{ "%.2f"|format(limit_gb) }}
+                            GB
+
+                        </td>
+
+
+                        <td>
+
+                            {{ user.expires_at[:10] }}
+
+                        </td>
+
+
+                        <td>
+
+                            <div
+                                style="
+                                    display:flex;
+                                    gap:7px;
+                                    flex-wrap:wrap;
+                                "
+                            >
+
+                                <button
+                                    onclick="showConfig({{ user.id }})"
+                                >
+                                    کانفیگ
+                                </button>
+
+
+                                <button
+                                    onclick="showEdit(
+                                        {{ user.id }},
+                                        '{{ user.name|replace("'", "\\'") }}',
+                                        {{ limit_gb }},
+                                        '{{ user.expires_at }}',
+                                        {{ user.active }}
+                                    )"
+                                >
+                                    ویرایش
+                                </button>
+
+
+                                <form
+                                    method="POST"
+                                    action="/users/{{ user.id }}/reset"
+                                    style="display:inline;"
+                                >
+
+                                    <button
+                                        type="submit"
+                                        onclick="
+                                            return confirm(
+                                                'مصرف این کاربر ریست شود؟'
+                                            )
+                                        "
+                                    >
+                                        ریست حجم
+                                    </button>
+
+                                </form>
+
+
+                                <form
+                                    method="POST"
+                                    action="/users/{{ user.id }}/delete"
+                                    style="display:inline;"
+                                >
+
+                                    <button
+                                        type="submit"
+                                        onclick="
+                                            return confirm(
+                                                'این کاربر حذف شود؟'
+                                            )
+                                        "
+                                    >
+                                        حذف
+                                    </button>
+
+                                </form>
+
+                            </div>
+
+                        </td>
+
+                    </tr>
+
+                    {% endfor %}
+
+                    </tbody>
+
+                </table>
 
             </div>
+
+            {% else %}
+
+            <p>
+                هنوز کاربری ساخته نشده است.
+            </p>
+
+            {% endif %}
 
         </div>
 
@@ -190,15 +345,178 @@
 </div>
 
 
+<!-- CONFIG MODAL -->
+
+<div
+    id="configModal"
+    style="
+        display:none;
+        position:fixed;
+        inset:0;
+        background:rgba(0,0,0,.75);
+        align-items:center;
+        justify-content:center;
+        padding:20px;
+    "
+>
+
+    <div
+        style="
+            width:100%;
+            max-width:700px;
+            background:#181c25;
+            padding:25px;
+            border-radius:15px;
+        "
+    >
+
+        <h2>
+            کانفیگ کاربر
+        </h2>
+
+        <textarea
+            id="configText"
+            readonly
+            style="
+                width:100%;
+                min-height:150px;
+                margin-top:15px;
+                direction:ltr;
+                background:#10131a;
+                color:white;
+                padding:15px;
+                border-radius:10px;
+            "
+        ></textarea>
+
+        <button
+            onclick="copyConfig()"
+            style="margin-top:12px;"
+        >
+            📋 کپی
+        </button>
+
+        <button
+            onclick="closeConfig()"
+            style="margin-top:12px;"
+        >
+            بستن
+        </button>
+
+    </div>
+
+</div>
+
+
+<!-- EDIT MODAL -->
+
+<div
+    id="editModal"
+    style="
+        display:none;
+        position:fixed;
+        inset:0;
+        background:rgba(0,0,0,.75);
+        align-items:center;
+        justify-content:center;
+        padding:20px;
+    "
+>
+
+    <div
+        style="
+            width:100%;
+            max-width:500px;
+            background:#181c25;
+            padding:25px;
+            border-radius:15px;
+        "
+    >
+
+        <h2>
+            ویرایش کاربر
+        </h2>
+
+        <form
+            id="editForm"
+            method="POST"
+            style="
+                display:grid;
+                gap:12px;
+                margin-top:20px;
+            "
+        >
+
+            <input
+                id="editName"
+                type="text"
+                name="name"
+                required
+            >
+
+            <input
+                id="editVolume"
+                type="number"
+                name="volume"
+                min="1"
+                step="0.1"
+                required
+            >
+
+            <input
+                id="editDays"
+                type="number"
+                name="days"
+                min="1"
+                required
+            >
+
+            <select
+                id="editActive"
+                name="active"
+            >
+
+                <option value="1">
+                    فعال
+                </option>
+
+                <option value="0">
+                    غیرفعال
+                </option>
+
+            </select>
+
+            <button type="submit">
+                ذخیره تغییرات
+            </button>
+
+            <button
+                type="button"
+                onclick="closeEdit()"
+            >
+                بستن
+            </button>
+
+        </form>
+
+    </div>
+
+</div>
+
+
 <script>
 
-async function generateConfig() {
+async function showConfig(id) {
 
     try {
 
-        const response = await fetch("/generate-config");
+        const response =
+            await fetch(
+                "/users/" + id + "/config"
+            );
 
-        const data = await response.json();
+        const data =
+            await response.json();
 
         if (data.error) {
 
@@ -207,15 +525,21 @@ async function generateConfig() {
             return;
         }
 
-        document.getElementById("config").value =
-            data.config;
+        document.getElementById(
+            "configText"
+        ).value = data.config;
 
-        document.getElementById("configBox").style.display =
-            "block";
+        document.getElementById(
+            "configModal"
+        ).style.display = "flex";
 
-    } catch (error) {
+    }
 
-        alert("خطا در ساخت کانفیگ");
+    catch (error) {
+
+        alert(
+            "خطا در دریافت کانفیگ"
+        );
 
     }
 
@@ -224,26 +548,76 @@ async function generateConfig() {
 
 function copyConfig() {
 
-    const config =
-        document.getElementById("config");
-
-    config.select();
-
-    config.setSelectionRange(
-        0,
-        99999
-    );
+    const text =
+        document.getElementById(
+            "configText"
+        ).value;
 
     navigator.clipboard.writeText(
-        config.value
+        text
     );
 
-    alert("کانفیگ کپی شد");
+    alert(
+        "کانفیگ کپی شد"
+    );
+
+}
+
+
+function closeConfig() {
+
+    document.getElementById(
+        "configModal"
+    ).style.display = "none";
+
+}
+
+
+function showEdit(
+    id,
+    name,
+    volume,
+    expires,
+    active
+) {
+
+    document.getElementById(
+        "editForm"
+    ).action =
+        "/users/" + id + "/edit";
+
+    document.getElementById(
+        "editName"
+    ).value = name;
+
+    document.getElementById(
+        "editVolume"
+    ).value = volume;
+
+    document.getElementById(
+        "editActive"
+    ).value = active;
+
+    document.getElementById(
+        "editDays"
+    ).value = 30;
+
+    document.getElementById(
+        "editModal"
+    ).style.display = "flex";
+
+}
+
+
+function closeEdit() {
+
+    document.getElementById(
+        "editModal"
+    ).style.display = "none";
 
 }
 
 </script>
 
 </body>
-
-</html>
+    </html>
