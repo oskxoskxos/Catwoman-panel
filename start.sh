@@ -4,10 +4,10 @@ echo "Starting Xray..."
 
 xray run -config /app/xray/config.json &
 
-XRAY_PID=$!
+echo "Starting Flask..."
 
-echo "Xray started with PID $XRAY_PID"
+gunicorn --bind 127.0.0.1:8080 app:app &
 
-echo "Starting Flask panel..."
+echo "Starting Nginx..."
 
-exec gunicorn --bind 0.0.0.0:${PORT:-8080} app:app
+exec nginx -g "daemon off;"
