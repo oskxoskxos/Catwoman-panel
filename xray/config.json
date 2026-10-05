@@ -17,6 +17,7 @@
       },
       "streamSettings": {
         "network": "ws",
+        "security": "none",
         "wsSettings": {
           "path": "/xray-ws"
         }
