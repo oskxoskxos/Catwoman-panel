@@ -6,7 +6,7 @@ echo "Starting Xray..."
 
 echo "Starting Flask..."
 
-gunicorn --bind 127.0.0.1:8080 app:app &
+gunicorn --bind 127.0.0.1:5000 app:app &
 
 echo "Starting Nginx..."
 
