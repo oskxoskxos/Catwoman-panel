@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+name="viewport"
+content="width=device-width, initial-scale=1.0"
+>
+
+<title>
+{{ user.name }} | Catwoman
+</title>
+
+<link
+rel="stylesheet"
+href="{{ url_for('static', filename='style.css') }}"
+>
+
+<style>
+
+.portal {
+
+    max-width: 700px;
+
+    margin: auto;
+
+    padding: 25px 15px 60px;
+
+}
+
+.portal-logo {
+
+    text-align: center;
+
+    padding: 25px;
+
+}
+
+.portal-logo strong {
+
+    display: block;
+
+    color: #ff2bd6;
+
+    font-size: 30px;
+
+    text-shadow:
+        0 0 15px #ff2bd6;
+
+}
+
+.portal-logo span {
+
+    color: #aaa;
+
+    font-size: 11px;
+
+    letter-spacing: 5px;
+
+}
+
+.portal-card {
+
+    background:
+        linear-gradient(
+            145deg,
+            #180b1c,
+            #0c070e
+        );
+
+    border:
+        1px solid rgba(255,43,214,.25);
+
+    border-radius: 22px;
+
+    padding: 25px;
+
+    margin-bottom: 15px;
+
+}
+
+.portal-user {
+
+    display: flex;
+
+    align-items: center;
+
+    gap: 15px;
+
+}
+
+.portal-avatar {
+
+    width: 60px;
+
+    height: 60px;
+
+    display: grid;
+
+    place-items: center;
+
+    border-radius: 17px;
+
+    background:
+        rgba(255,43,214,.13);
+
+    color: #ff2bd6;
+
+    font-size: 25px;
+
+    font-weight: 900;
+
+}
+
+.portal-user h1 {
+
+    margin: 0 0 4px;
+
+}
+
+.portal-user p {
+
+    margin: 0;
+
+    color: #998999;
+
+}
+
+
+.big-usage {
+
+    text-align: center;
+
+    margin: 30px 0;
+
+}
+
+.big-usage strong {
+
+    display: block;
+
+    font-size: 42px;
+
+    color: #ff2bd6;
+
+    text-shadow:
+        0 0 20px rgba(255,43,214,.4);
+
+}
+
+.big-usage span {
+
+    color: #998999;
+
+}
+
+
+.portal-progress {
+
+    height: 13px;
+
+    background: #251727;
+
+    border-radius: 20px;
+
+    overflow: hidden;
+
+}
+
+.portal-progress div {
+
+    height: 100%;
+
+    background:
+        linear-gradient(
+            90deg,
+            #ff2bd6,
+            #ff78e7
+        );
+
+    box-shadow:
+        0 0 18px #ff2bd6;
+
+}
+
+
+.portal-grid {
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(2,1fr);
+
+    gap: 10px;
+
+}
+
+
+.portal-stat {
+
+    background:
+        rgba(255,255,255,.025);
+
+    border-radius: 13px;
+
+    padding: 15px;
+
+}
+
+
+.portal-stat small {
+
+    display: block;
+
+    color: #998999;
+
+    margin-bottom: 5px;
+
+}
+
+
+.portal-stat strong {
+
+    font-size: 18px;
+
+}
+
+
+.portal-config {
+
+    direction: ltr;
+
+    min-height: 130px;
+
+    margin-top: 15px;
+
+    resize: none;
+
+}
+
+
+.portal-button {
+
+    width: 100%;
+
+    margin-top: 12px;
+
+    padding: 14px;
+
+    border: 0;
+
+    border-radius: 12px;
+
+    background:
+        linear-gradient(
+            135deg,
+            #ff2bd6,
+            #ff4ebf
+        );
+
+    color: white;
+
+    font-weight: 800;
+
+}
+
+
+@media(max-width:500px) {
+
+    .portal {
+
+        padding: 10px 10px 40px;
+
+    }
+
+    .portal-card {
+
+        padding: 18px;
+
+    }
+
+    .portal-grid {
+
+        grid-template-columns: 1fr 1fr;
+
+    }
+
+}
+
+</style>
+
+</head>
+
+
+<body>
+
+<div class="portal">
+
+
+<div class="portal-logo">
+
+<strong>
+CATWOMAN
+</strong>
+
+<span>
+SUBSCRIBER PORTAL
+</span>
+
+</div>
+
+
+<div class="portal-card">
+
+<div class="portal-user">
+
+<div class="portal-avatar">
+
+{{ user.name[0]|upper }}
+
+</div>
+
+<div>
+
+<h1>
+{{ user.name }}
+</h1>
+
+<p>
+وضعیت اشتراک شما
+</p>
+
+</div>
+
+</div>
+
+
+<div class="big-usage">
+
+<strong>
+{{ "%.2f"|format(user.remaining_gb) }}
+ GB
+</strong>
+
+<span>
+حجم باقی‌مانده
+</span>
+
+</div>
+
+
+<div class="portal-progress">
+
+<div
+style="width:{{ user.percent }}%"
+></div>
+
+</div>
+
+
+<div
+style="
+display:flex;
+justify-content:space-between;
+margin-top:10px;
+color:#998999;
+font-size:11px;
+"
+>
+
+<span>
+مصرف:
+{{ "%.2f"|format(user.used_gb) }} GB
+</span>
+
+<span>
+کل:
+{{ "%.2f"|format(user.limit_gb) }} GB
+</span>
+
+</div>
+
+</div>
+
+
+<div class="portal-card">
+
+<div class="portal-grid">
+
+
+<div class="portal-stat">
+
+<small>
+حجم کل
+</small>
+
+<strong>
+{{ "%.2f"|format(user.limit_gb) }}
+ GB
+</strong>
+
+</div>
+
+
+<div class="portal-stat">
+
+<small>
+مصرف شده
+</small>
+
+<strong>
+{{ "%.2f"|format(user.used_gb) }}
+ GB
+</strong>
+
+</div>
+
+
+<div class="portal-stat">
+
+<small>
+باقی مانده
+</small>
+
+<strong>
+{{ "%.2f"|format(user.remaining_gb) }}
+ GB
+</strong>
+
+</div>
+
+
+<div class="portal-stat">
+
+<small>
+روز باقی مانده
+</small>
+
+<strong>
+{{ user.days_left }}
+ روز
+</strong>
+
+</div>
+
+
+</div>
+
+</div>
+
+
+<div class="portal-card">
+
+<h2>
+کانفیگ اتصال
+</h2>
+
+<textarea
+id="config"
+class="portal-config"
+readonly
+>{{ user.config }}</textarea>
+
+<button
+class="portal-button"
+onclick="copyConfig()"
+>
+کپی کانفیگ
+</button>
+
+</div>
+
+
+<div
+style="
+text-align:center;
+color:#665766;
+font-size:10px;
+margin-top:25px;
+"
+>
+
+Powered by Catwoman Panel
+
+</div>
+
+</div>
+
+
+<script>
+
+function copyConfig() {
+
+const config =
+document.getElementById(
+"config"
+).value;
+
+navigator.clipboard.writeText(
+config
+);
+
+alert(
+"کانفیگ کپی شد ✓"
+);
+
+}
+
+</script>
+
+</body>
+
+</html>
