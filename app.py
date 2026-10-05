@@ -1,16 +1,15 @@
 from flask import Flask, render_template, request, redirect, url_for, session
+import os
 
 app = Flask(__name__)
 
-# Simple settings
 app.secret_key = "my-simple-secret-key"
 
-# Login information
 USERNAME = "admin"
 PASSWORD = "admin123"
 
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 def index():
     if "logged_in" not in session:
         return redirect(url_for("login"))
@@ -23,13 +22,11 @@ def login():
 
     if request.method == "POST":
 
-        username = request.form.get("username", "")
-        password = request.form.get("password", "")
+        username = request.form.get("username")
+        password = request.form.get("password")
 
         if username == USERNAME and password == PASSWORD:
-
             session["logged_in"] = True
-
             return redirect(url_for("dashboard"))
 
         return render_template(
@@ -74,7 +71,7 @@ def logout():
 
 if __name__ == "__main__":
 
-    port = 8080
+    port = int(os.environ.get("PORT", 8080))
 
     app.run(
         host="0.0.0.0",
