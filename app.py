@@ -1,30 +1,47 @@
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify
-import sqlite3
-import uuid
 import os
 import json
-import subprocess
-import signal
+import uuid
 import time
-from datetime import datetime, timedelta, timezone
-from threading import Thread, Lock
+import base64
+import secrets
+import sqlite3
+import subprocess
+from datetime import datetime, timezone
+from urllib.parse import quote
+
+from flask import (
+    Flask,
+    request,
+    session,
+    redirect,
+    url_for,
+    render_template,
+    jsonify,
+    Response,
+)
+
+# =========================================================
+# CATWOMAN PANEL
+# =========================================================
 
 app = Flask(__name__)
 
 app.secret_key = "catwoman-panel-secret-key"
 
-USERNAME = "admin"
-PASSWORD = "admin123"
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "admin123"
 
-DB_PATH = "/app/data/panel.db"
+DB_DIR = "/app/data"
+DB_PATH = os.path.join(DB_DIR, "panel.db")
 
+XRAY_PATH = "/usr/local/bin/xray/xray"
 XRAY_CONFIG = "/app/xray/config.json"
-XRAY_BINARY = "/usr/local/bin/xray/xray"
 XRAY_API = "127.0.0.1:10085"
 
-XRAY_PATH = "/xray-ws"
+WS_PATH = "/xray-ws"
 
-xray_lock = Lock()
+os.makedirs(DB_DIR, exist_ok=True)
+os.makedirs("/app/xray", exist_ok=True)
 
 
 # =========================================================
@@ -32,341 +49,358 @@ xray_lock = Lock()
 # =========================================================
 
 def db():
-
-    os.makedirs("/app/data", exist_ok=True)
-
-    conn = sqlite3.connect(
-        DB_PATH,
-        timeout=30,
-        check_same_thread=False
-    )
-
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-
     return conn
 
 
-def init_database():
+def column_exists(conn, table, column):
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
 
+
+def init_db():
     conn = db()
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
-
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-
             name TEXT NOT NULL,
-
             uuid TEXT NOT NULL UNIQUE,
-
-            limit_bytes INTEGER NOT NULL,
-
+            limit_bytes INTEGER NOT NULL DEFAULT 10737418240,
             used_bytes INTEGER NOT NULL DEFAULT 0,
-
             xray_base INTEGER NOT NULL DEFAULT 0,
-
-            expires_at TEXT NOT NULL,
-
+            expires_at TEXT,
             active INTEGER NOT NULL DEFAULT 1,
-
+            sub_token TEXT UNIQUE,
             created_at TEXT NOT NULL
-
         )
     """)
 
+    # Migration for old databases
+    migrations = {
+        "xray_base": "INTEGER NOT NULL DEFAULT 0",
+        "sub_token": "TEXT",
+        "limit_bytes": "INTEGER NOT NULL DEFAULT 10737418240",
+        "used_bytes": "INTEGER NOT NULL DEFAULT 0",
+        "expires_at": "TEXT",
+        "active": "INTEGER NOT NULL DEFAULT 1",
+        "created_at": "TEXT",
+    }
+
+    for column, definition in migrations.items():
+        if not column_exists(conn, "users", column):
+            conn.execute(
+                f"ALTER TABLE users ADD COLUMN {column} {definition}"
+            )
+
+    # Give old users a secure subscription token
+    users = conn.execute(
+        "SELECT id FROM users WHERE sub_token IS NULL OR sub_token = ''"
+    ).fetchall()
+
+    for user in users:
+        token = generate_token()
+
+        while conn.execute(
+            "SELECT 1 FROM users WHERE sub_token = ?",
+            (token,)
+        ).fetchone():
+            token = generate_token()
+
+        conn.execute(
+            "UPDATE users SET sub_token = ? WHERE id = ?",
+            (token, user["id"])
+        )
+
     conn.commit()
     conn.close()
+
+
+def generate_token():
+    return "cw_" + secrets.token_urlsafe(32)
+
+
+init_db()
+
+
+# =========================================================
+# AUTH
+# =========================================================
+
+def logged_in():
+    return session.get("admin") is True
+
+
+def login_required():
+    if not logged_in():
+        return redirect(url_for("login"))
+
+    return None
 
 
 # =========================================================
 # HELPERS
 # =========================================================
 
-def format_bytes(value):
-
-    value = float(value)
-
-    if value < 1024:
-        return f"{value:.0f} B"
-
-    if value < 1024 ** 2:
-        return f"{value / 1024:.2f} KB"
-
-    if value < 1024 ** 3:
-        return f"{value / (1024 ** 2):.2f} MB"
-
-    if value < 1024 ** 4:
-        return f"{value / (1024 ** 3):.2f} GB"
-
-    return f"{value / (1024 ** 4):.2f} TB"
+def now_utc():
+    return datetime.now(timezone.utc)
 
 
-def calculate_percent(used, limit):
+def iso_now():
+    return now_utc().isoformat()
 
-    if limit <= 0:
+
+def parse_date(value):
+    if not value:
+        return None
+
+    try:
+        value = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def gb_to_bytes(gb):
+    try:
+        return int(float(gb) * 1024 * 1024 * 1024)
+    except Exception:
         return 0
 
-    percent = (
-        used / limit
-    ) * 100
 
-    return min(
-        100,
-        max(0, percent)
-    )
+def bytes_to_gb(value):
+    return round(int(value or 0) / (1024 ** 3), 2)
 
 
 def days_left(expires_at):
+    if not expires_at:
+        return None
 
-    try:
+    dt = parse_date(expires_at)
 
-        expire = datetime.fromisoformat(
-            expires_at
-        )
+    if not dt:
+        return None
 
-        now = datetime.now(
-            timezone.utc
-        )
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
 
-        seconds = (
-            expire - now
-        ).total_seconds()
+    seconds = (dt - now_utc()).total_seconds()
 
-        return max(
-            0,
-            int(seconds / 86400)
-        )
-
-    except Exception:
-
+    if seconds <= 0:
         return 0
+
+    return int(seconds // 86400)
+
+
+def hours_left(expires_at):
+    if not expires_at:
+        return None
+
+    dt = parse_date(expires_at)
+
+    if not dt:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    seconds = (dt - now_utc()).total_seconds()
+
+    if seconds <= 0:
+        return 0
+
+    return int(seconds // 3600)
+
+
+def format_expiry(expires_at):
+    if not expires_at:
+        return "نامحدود"
+
+    dt = parse_date(expires_at)
+
+    if not dt:
+        return "نامشخص"
+
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 
 # =========================================================
 # XRAY STATS
 # =========================================================
 
-def get_xray_stats():
+def xray_stats():
+    """
+    Returns all Xray traffic statistics.
+    """
 
     try:
-
         result = subprocess.run(
             [
-                XRAY_BINARY,
+                XRAY_PATH,
                 "api",
                 "statsquery",
                 "--server=" + XRAY_API
             ],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=10
         )
 
         if result.returncode != 0:
+            print("Xray stats error:", result.stderr)
             return {}
 
-        data = json.loads(
-            result.stdout
-        )
+        data = json.loads(result.stdout)
 
-        stats = {}
+        output = {}
 
-        for item in data.get(
-            "stat",
-            []
-        ):
+        for item in data.get("stat", []):
+            name = item.get("name")
+            value = item.get("value", 0)
 
-            name = item.get(
-                "name",
-                ""
-            )
+            try:
+                value = int(value)
+            except Exception:
+                value = 0
 
-            value = int(
-                item.get(
-                    "value",
-                    0
-                )
-            )
+            output[name] = value
 
-            if not name.startswith(
-                "user>>>"
-            ):
-                continue
+        return output
 
-            parts = name.split(
-                ">>>"
-            )
-
-            if len(parts) != 4:
-                continue
-
-            email = parts[1]
-            direction = parts[3]
-
-            if email not in stats:
-
-                stats[email] = {
-                    "uplink": 0,
-                    "downlink": 0
-                }
-
-            if direction == "uplink":
-
-                stats[email][
-                    "uplink"
-                ] = value
-
-            elif direction == "downlink":
-
-                stats[email][
-                    "downlink"
-                ] = value
-
-        return stats
-
-    except Exception:
-
+    except Exception as e:
+        print("Stats exception:", e)
         return {}
 
 
-def sync_usage():
+def get_user_xray_total(user):
+    """
+    Xray identifies traffic statistics by:
+    user>>>email>>>traffic>>>uplink
+    user>>>email>>>traffic>>>downlink
+    """
 
-    stats = get_xray_stats()
+    stats = xray_stats()
 
+    email = f"user-{user['id']}"
+
+    uplink_key = f"user>>>{email}>>>traffic>>>uplink"
+    downlink_key = f"user>>>{email}>>>traffic>>>downlink"
+
+    uplink = int(stats.get(uplink_key, 0))
+    downlink = int(stats.get(downlink_key, 0))
+
+    return uplink + downlink
+
+
+def sync_user_usage(user_id):
     conn = db()
 
-    users = conn.execute(
-        "SELECT * FROM users"
-    ).fetchall()
+    user = conn.execute(
+        "SELECT * FROM users WHERE id = ?",
+        (user_id,)
+    ).fetchone()
 
-    changed = False
+    if not user:
+        conn.close()
+        return None
 
-    for user in users:
+    current = get_user_xray_total(user)
 
-        email = f"user-{user['id']}"
+    previous_base = int(user["xray_base"] or 0)
+    used = int(user["used_bytes"] or 0)
 
-        current = stats.get(
-            email,
-            {
-                "uplink": 0,
-                "downlink": 0
-            }
-        )
+    # Xray counters can reset after Xray restart.
+    if current >= previous_base:
+        delta = current - previous_base
+    else:
+        delta = current
 
-        current_total = (
-            current["uplink"] +
-            current["downlink"]
-        )
+    used += max(delta, 0)
 
-        previous_base = user[
-            "xray_base"
-        ]
-
-        if current_total >= previous_base:
-
-            delta = (
-                current_total -
-                previous_base
-            )
-
-        else:
-
-            # Xray stats reset شده
-            delta = current_total
-
-        if delta > 0:
-
-            new_used = (
-                user["used_bytes"] +
-                delta
-            )
-
-            conn.execute("""
-                UPDATE users
-
-                SET used_bytes = ?,
-                    xray_base = ?
-
-                WHERE id = ?
-            """, (
-                new_used,
-                current_total,
-                user["id"]
-            ))
-
-            changed = True
+    conn.execute(
+        """
+        UPDATE users
+        SET used_bytes = ?,
+            xray_base = ?
+        WHERE id = ?
+        """,
+        (used, current, user_id)
+    )
 
     conn.commit()
 
+    updated = conn.execute(
+        "SELECT * FROM users WHERE id = ?",
+        (user_id,)
+    ).fetchone()
+
     conn.close()
 
-    return changed
+    return updated
+
+
+def sync_all_users():
+    conn = db()
+
+    users = conn.execute(
+        "SELECT id FROM users"
+    ).fetchall()
+
+    conn.close()
+
+    for user in users:
+        sync_user_usage(user["id"])
 
 
 # =========================================================
 # LIMIT CHECK
 # =========================================================
 
+def user_should_be_disabled(user):
+    used = int(user["used_bytes"] or 0)
+    limit = int(user["limit_bytes"] or 0)
+
+    if limit > 0 and used >= limit:
+        return True
+
+    if user["expires_at"]:
+        dt = parse_date(user["expires_at"])
+
+        if dt:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+            if dt <= now_utc():
+                return True
+
+    return False
+
+
 def check_limits():
-
-    sync_usage()
-
     conn = db()
 
-    users = conn.execute("""
-        SELECT *
-        FROM users
-        WHERE active = 1
-    """).fetchall()
-
-    now = datetime.now(
-        timezone.utc
-    )
+    users = conn.execute(
+        "SELECT * FROM users WHERE active = 1"
+    ).fetchall()
 
     changed = False
 
     for user in users:
+        updated = sync_user_usage(user["id"])
 
-        disable = False
-
-        if user["used_bytes"] >= user[
-            "limit_bytes"
-        ]:
-
-            disable = True
-
-        try:
-
-            expires = datetime.fromisoformat(
-                user["expires_at"]
+        if updated and user_should_be_disabled(updated):
+            conn.execute(
+                "UPDATE users SET active = 0 WHERE id = ?",
+                (updated["id"],)
             )
-
-            if expires <= now:
-
-                disable = True
-
-        except Exception:
-
-            pass
-
-        if disable:
-
-            conn.execute("""
-                UPDATE users
-                SET active = 0
-                WHERE id = ?
-            """, (
-                user["id"],
-            ))
-
             changed = True
 
     conn.commit()
     conn.close()
 
     if changed:
-
-        restart_xray()
+        rebuild_xray_config()
 
 
 # =========================================================
@@ -374,136 +408,104 @@ def check_limits():
 # =========================================================
 
 def build_xray_config():
-
     conn = db()
 
-    users = conn.execute("""
+    users = conn.execute(
+        """
         SELECT *
         FROM users
         WHERE active = 1
-    """).fetchall()
+        ORDER BY id ASC
+        """
+    ).fetchall()
 
     conn.close()
 
     clients = []
 
     for user in users:
-
         clients.append({
-
             "id": user["uuid"],
-
             "level": 0,
-
-            "email":
-                f"user-{user['id']}"
-
+            "email": f"user-{user['id']}"
         })
 
     config = {
-
         "log": {
             "loglevel": "warning"
         },
 
+        # Xray API
         "api": {
-
             "tag": "api",
-
             "services": [
                 "StatsService"
             ]
-
         },
 
+        # Traffic statistics
         "stats": {},
 
+        # Enable user traffic statistics
         "policy": {
-
             "levels": {
-
                 "0": {
-
-                    "handshake": 60,
-
-                    "connIdle": 300,
-
-                    "uplinkOnly": 1,
-
-                    "downlinkOnly": 1,
-
                     "statsUserUplink": True,
-
-                    "statsUserDownlink": True,
-
-                    "statsUserOnline": True,
-
-                    "bufferSize": 4
-
+                    "statsUserDownlink": True
                 }
-
             }
-
         },
 
         "inbounds": [
 
+            # VLESS WebSocket
             {
-
                 "listen": "127.0.0.1",
-
                 "port": 10000,
-
                 "protocol": "vless",
 
                 "settings": {
-
                     "clients": clients,
-
                     "decryption": "none"
-
                 },
 
                 "streamSettings": {
-
                     "network": "ws",
-
                     "security": "none",
 
                     "wsSettings": {
-
-                        "path": XRAY_PATH
-
+                        "path": WS_PATH
                     }
-
                 }
-
             },
 
+            # Local Xray API
             {
-
                 "listen": "127.0.0.1",
-
                 "port": 10085,
-
-                "protocol": "tunnel",
+                "protocol": "dokodemo-door",
 
                 "settings": {
-
-                    "services": [
-                        "StatsService"
-                    ]
-
+                    "address": "127.0.0.1"
                 },
 
                 "tag": "api"
-
             }
-
         ],
 
-        "outbounds": [
+        "routing": {
+            "rules": [
+                {
+                    "type": "field",
+                    "inboundTag": [
+                        "api"
+                    ],
+                    "outboundTag": "api"
+                }
+            ]
+        },
 
+        "outbounds": [
             {
                 "protocol": "freedom",
                 "tag": "direct"
@@ -511,117 +513,49 @@ def build_xray_config():
 
             {
                 "protocol": "blackhole",
-                "tag": "blocked"
+                "tag": "block"
             }
-
-        ],
-
-        "routing": {
-
-            "rules": [
-
-                {
-
-                    "type": "field",
-
-                    "inboundTag": [
-                        "api"
-                    ],
-
-                    "outboundTag": "api"
-
-                }
-
-            ]
-
-        }
-
+        ]
     }
 
-    os.makedirs(
-        "/app/xray",
-        exist_ok=True
-    )
-
-    with open(
-        XRAY_CONFIG,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
+    with open(XRAY_CONFIG, "w", encoding="utf-8") as f:
         json.dump(
             config,
-            file,
-            indent=2,
-            ensure_ascii=False
+            f,
+            ensure_ascii=False,
+            indent=2
         )
+
+    return config
 
 
 def restart_xray():
+    """
+    Rebuild config and restart Xray.
 
-    with xray_lock:
+    IMPORTANT:
+    We intentionally DO NOT set xray_base=0 here.
+    If Xray resets its counters, sync logic detects
+    current < previous_base and starts from current.
+    """
 
-        try:
-            sync_usage()
-        except Exception:
-            pass
+    build_xray_config()
 
-        build_xray_config()
+    try:
+        subprocess.run(
+            ["pkill", "-f", XRAY_PATH],
+            capture_output=True,
+            timeout=5
+        )
+    except Exception:
+        pass
 
-        pid_file = "/tmp/xray.pid"
+    time.sleep(1)
 
-        old_pid = None
-
-        if os.path.exists(pid_file):
-
-            try:
-
-                with open(
-                    pid_file,
-                    "r"
-                ) as file:
-
-                    old_pid = int(
-                        file.read().strip()
-                    )
-
-            except Exception:
-
-                old_pid = None
-
-        if old_pid:
-
-            try:
-
-                os.kill(
-                    old_pid,
-                    signal.SIGTERM
-                )
-
-            except Exception:
-
-                pass
-
-            for _ in range(20):
-
-                try:
-
-                    os.kill(
-                        old_pid,
-                        0
-                    )
-
-                    time.sleep(
-                        0.1
-                    )
-
-                except Exception:
-
-                    break
-
-        process = subprocess.Popen(
+    try:
+        subprocess.Popen(
             [
-                XRAY_BINARY,
+                XRAY_PATH,
                 "run",
                 "-config",
                 XRAY_CONFIG
@@ -630,105 +564,119 @@ def restart_xray():
             stderr=subprocess.DEVNULL
         )
 
-        with open(
-            pid_file,
-            "w"
-        ) as file:
+        time.sleep(1)
 
-            file.write(
-                str(process.pid)
-            )
+        print("Xray restarted successfully.")
 
-        # Xray جدید از صفر شروع می‌کند.
-        # بنابراین baseline جدید باید
-        # بعد از شروع Xray دوباره صفر باشد.
-        conn = db()
+    except Exception as e:
+        print("Xray restart error:", e)
 
-        conn.execute("""
-            UPDATE users
-            SET xray_base = 0
-        """)
 
-        conn.commit()
-        conn.close()
+def rebuild_xray_config():
+    build_xray_config()
 
 
 # =========================================================
-# BACKGROUND
+# PUBLIC HOST / SUBSCRIPTION
 # =========================================================
 
-def background_worker():
+def public_host():
+    """
+    Railway/Nginx terminates HTTPS before Flask.
+    The public URL is therefore HTTPS on port 443.
+    """
 
-    time.sleep(5)
+    host = request.headers.get("X-Forwarded-Host")
 
-    while True:
+    if not host:
+        host = request.host
 
-        try:
-            check_limits()
-        except Exception:
-            pass
+    # Remove accidental port
+    host = host.split(":")[0]
 
-        time.sleep(15)
+    return host
+
+
+def make_vless_link(user):
+    host = public_host()
+
+    name = quote(
+        str(user["name"]),
+        safe=""
+    )
+
+    path = quote(
+        WS_PATH,
+        safe=""
+    )
+
+    return (
+        f"vless://{user['uuid']}"
+        f"@{host}:443"
+        f"?encryption=none"
+        f"&security=tls"
+        f"&type=ws"
+        f"&host={quote(host, safe='')}"
+        f"&path={path}"
+        f"#{name}"
+    )
+
+
+def make_subscription(user):
+    """
+    Standard Base64 subscription format.
+
+    Each line is a VLESS URI.
+    """
+
+    vless = make_vless_link(user)
+
+    encoded = base64.b64encode(
+        vless.encode("utf-8")
+    ).decode("utf-8")
+
+    return encoded
 
 
 # =========================================================
-# AUTH
+# DASHBOARD
 # =========================================================
 
 @app.route("/")
 def index():
+    if logged_in():
+        return redirect(url_for("dashboard"))
 
-    if "logged_in" not in session:
-
-        return redirect(
-            url_for("login")
-        )
-
-    return redirect(
-        url_for("dashboard")
-    )
+    return redirect(url_for("login"))
 
 
-@app.route(
-    "/login",
-    methods=["GET", "POST"]
-)
+@app.route("/login", methods=["GET", "POST"])
 def login():
 
     if request.method == "POST":
 
-        username = request.form.get(
-            "username",
-            ""
-        )
-
-        password = request.form.get(
-            "password",
-            ""
-        )
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
 
         if (
-            username == USERNAME
-            and
-            password == PASSWORD
+            username == ADMIN_USERNAME
+            and password == ADMIN_PASSWORD
         ):
-
-            session[
-                "logged_in"
-            ] = True
-
-            return redirect(
-                url_for("dashboard")
-            )
+            session["admin"] = True
+            return redirect(url_for("dashboard"))
 
         return render_template(
             "login.html",
             error="نام کاربری یا رمز عبور اشتباه است."
         )
 
-    return render_template(
-        "login.html"
-    )
+    return render_template("login.html")
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 # =========================================================
@@ -738,23 +686,22 @@ def login():
 @app.route("/dashboard")
 def dashboard():
 
-    if "logged_in" not in session:
+    guard = login_required()
 
-        return redirect(
-            url_for("login")
-        )
+    if guard:
+        return guard
 
     check_limits()
 
-    sync_usage()
-
     conn = db()
 
-    users = conn.execute("""
+    users = conn.execute(
+        """
         SELECT *
         FROM users
         ORDER BY id DESC
-    """).fetchall()
+        """
+    ).fetchall()
 
     conn.close()
 
@@ -762,54 +709,54 @@ def dashboard():
 
     for user in users:
 
-        item = dict(user)
+        limit = int(user["limit_bytes"] or 0)
+        used = int(user["used_bytes"] or 0)
 
-        item[
-            "limit_gb"
-        ] = user["limit_bytes"] / (
-            1024 ** 3
-        )
+        if limit > 0:
+            percent = min(
+                100,
+                round((used / limit) * 100, 1)
+            )
 
-        item[
-            "used_gb"
-        ] = user["used_bytes"] / (
-            1024 ** 3
-        )
+            remaining = max(
+                0,
+                limit - used
+            )
+        else:
+            percent = 0
+            remaining = 0
 
-        item[
-            "remaining_bytes"
-        ] = max(
-            0,
-            user["limit_bytes"] -
-            user["used_bytes"]
-        )
-
-        item[
-            "remaining_gb"
-        ] = item[
-            "remaining_bytes"
-        ] / (
-            1024 ** 3
-        )
-
-        item[
-            "percent"
-        ] = calculate_percent(
-            user["used_bytes"],
-            user["limit_bytes"]
-        )
-
-        item[
-            "days_left"
-        ] = days_left(
-            user["expires_at"]
-        )
-
-        user_list.append(item)
+        user_list.append({
+            "id": user["id"],
+            "name": user["name"],
+            "uuid": user["uuid"],
+            "limit_bytes": limit,
+            "used_bytes": used,
+            "remaining_bytes": remaining,
+            "limit_gb": bytes_to_gb(limit),
+            "used_gb": bytes_to_gb(used),
+            "remaining_gb": bytes_to_gb(remaining),
+            "percent": percent,
+            "active": bool(user["active"]),
+            "days_left": days_left(user["expires_at"]),
+            "hours_left": hours_left(user["expires_at"]),
+            "expires_at": user["expires_at"],
+            "expires_text": format_expiry(user["expires_at"]),
+            "sub_token": user["sub_token"],
+            "sub_url": url_for(
+                "subscription",
+                token=user["sub_token"],
+                _external=True
+            ),
+            "portal_url": url_for(
+                "subscriber_portal",
+                token=user["sub_token"],
+                _external=True
+            )
+        })
 
     return render_template(
         "dashboard.html",
-        username=USERNAME,
         users=user_list
     )
 
@@ -821,24 +768,28 @@ def dashboard():
 @app.route("/settings")
 def settings():
 
-    if "logged_in" not in session:
+    guard = login_required()
 
-        return redirect(
-            url_for("login")
-        )
+    if guard:
+        return guard
 
     conn = db()
 
-    count = conn.execute(
-        "SELECT COUNT(*) FROM users"
-    ).fetchone()[0]
+    total = conn.execute(
+        "SELECT COUNT(*) AS count FROM users"
+    ).fetchone()["count"]
+
+    active = conn.execute(
+        "SELECT COUNT(*) AS count FROM users WHERE active = 1"
+    ).fetchone()["count"]
 
     conn.close()
 
     return render_template(
         "settings.html",
-        username=USERNAME,
-        user_count=count
+        total_users=total,
+        active_users=active,
+        username=ADMIN_USERNAME
     )
 
 
@@ -846,64 +797,57 @@ def settings():
 # CREATE USER
 # =========================================================
 
-@app.route(
-    "/users/create",
-    methods=["POST"]
-)
+@app.route("/users/create", methods=["POST"])
 def create_user():
 
-    if "logged_in" not in session:
+    guard = login_required()
 
-        return redirect(
-            url_for("login")
-        )
+    if guard:
+        return guard
 
-    name = request.form.get(
-        "name",
-        ""
-    ).strip()
-
-    volume = float(
-        request.form.get(
-            "volume",
-            "10"
-        )
-    )
-
-    days = int(
-        request.form.get(
-            "days",
-            "30"
-        )
-    )
+    name = request.form.get("name", "").strip()
+    limit_gb = request.form.get("limit_gb", "10").strip()
+    days = request.form.get("days", "30").strip()
 
     if not name:
-        name = "کاربر جدید"
+        return redirect(url_for("dashboard"))
 
-    volume = max(
-        0.1,
-        volume
-    )
+    try:
+        limit_gb_value = float(limit_gb)
+    except Exception:
+        limit_gb_value = 10
 
-    days = max(
-        1,
-        days
-    )
+    try:
+        days_value = int(days)
+    except Exception:
+        days_value = 30
 
-    now = datetime.now(
-        timezone.utc
-    )
+    if limit_gb_value <= 0:
+        limit_gb_value = 10
 
-    expires = (
-        now +
-        timedelta(
-            days=days
+    if days_value < 0:
+        days_value = 30
+
+    user_uuid = str(uuid.uuid4())
+    sub_token = generate_token()
+
+    if days_value == 0:
+        expires_at = None
+    else:
+        expires_at = (
+            now_utc().timestamp()
+            + days_value * 86400
         )
-    )
+
+        expires_at = datetime.fromtimestamp(
+            expires_at,
+            tz=timezone.utc
+        ).isoformat()
 
     conn = db()
 
-    conn.execute("""
+    conn.execute(
+        """
         INSERT INTO users
         (
             name,
@@ -913,305 +857,102 @@ def create_user():
             xray_base,
             expires_at,
             active,
+            sub_token,
             created_at
         )
-
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-
-        name,
-
-        str(uuid.uuid4()),
-
-        int(
-            volume *
-            1024 *
-            1024 *
-            1024
-        ),
-
-        0,
-
-        0,
-
-        expires.isoformat(),
-
-        1,
-
-        now.isoformat()
-
-    ))
+        VALUES (?, ?, ?, 0, 0, ?, 1, ?, ?)
+        """,
+        (
+            name,
+            user_uuid,
+            gb_to_bytes(limit_gb_value),
+            expires_at,
+            sub_token,
+            iso_now()
+        )
+    )
 
     conn.commit()
     conn.close()
 
     restart_xray()
 
-    return redirect(
-        url_for("dashboard")
-    )
+    return redirect(url_for("dashboard"))
 
 
 # =========================================================
 # EDIT USER
 # =========================================================
 
-@app.route(
-    "/users/<int:user_id>/edit",
-    methods=["POST"]
-)
+@app.route("/users/<int:user_id>/edit", methods=["POST"])
 def edit_user(user_id):
 
-    if "logged_in" not in session:
+    guard = login_required()
 
-        return redirect(
-            url_for("login")
-        )
+    if guard:
+        return guard
 
-    name = request.form.get(
-        "name",
-        ""
-    ).strip()
-
-    volume = float(
-        request.form.get(
-            "volume",
-            "10"
-        )
-    )
-
-    days = int(
-        request.form.get(
-            "days",
-            "30"
-        )
-    )
-
-    active = int(
-        request.form.get(
-            "active",
-            "1"
-        )
-    )
-
-    volume = max(
-        0.1,
-        volume
-    )
-
-    days = max(
-        1,
-        days
-    )
-
-    expires = (
-        datetime.now(timezone.utc)
-        +
-        timedelta(days=days)
-    )
+    name = request.form.get("name", "").strip()
+    limit_gb = request.form.get("limit_gb", "10").strip()
+    days = request.form.get("days", "").strip()
 
     conn = db()
 
-    conn.execute("""
-        UPDATE users
+    user = conn.execute(
+        "SELECT * FROM users WHERE id = ?",
+        (user_id,)
+    ).fetchone()
 
-        SET name = ?,
-            limit_bytes = ?,
-            expires_at = ?,
-            active = ?
+    if not user:
+        conn.close()
+        return redirect(url_for("dashboard"))
 
-        WHERE id = ?
-    """, (
+    try:
+        limit_value = float(limit_gb)
+    except Exception:
+        limit_value = bytes_to_gb(user["limit_bytes"])
 
-        name,
+    if limit_value <= 0:
+        limit_value = bytes_to_gb(user["limit_bytes"])
 
-        int(
-            volume *
-            1024 *
-            1024 *
-            1024
-        ),
+    expires_at = user["expires_at"]
 
-        expires.isoformat(),
+    if days:
+        try:
+            days_value = int(days)
 
-        active,
+            expires_at = (
+                now_utc().timestamp()
+                + days_value * 86400
+            )
 
-        user_id
+            expires_at = datetime.fromtimestamp(
+                expires_at,
+                tz=timezone.utc
+            ).isoformat()
 
-    ))
-
-    conn.commit()
-    conn.close()
-
-    restart_xray()
-
-    return redirect(
-        url_for("dashboard")
-    )
-
-
-# =========================================================
-# DELETE
-# =========================================================
-
-@app.route(
-    "/users/<int:user_id>/delete",
-    methods=["POST"]
-)
-def delete_user(user_id):
-
-    if "logged_in" not in session:
-
-        return redirect(
-            url_for("login")
-        )
-
-    sync_usage()
-
-    conn = db()
+        except Exception:
+            pass
 
     conn.execute(
-        "DELETE FROM users WHERE id = ?",
-        (user_id,)
-    )
-
-    conn.commit()
-    conn.close()
-
-    restart_xray()
-
-    return redirect(
-        url_for("dashboard")
-    )
-
-
-# =========================================================
-# RESET USAGE
-# =========================================================
-
-@app.route(
-    "/users/<int:user_id>/reset",
-    methods=["POST"]
-)
-def reset_usage(user_id):
-
-    if "logged_in" not in session:
-
-        return redirect(
-            url_for("login")
-        )
-
-    conn = db()
-
-    conn.execute("""
+        """
         UPDATE users
-
-        SET used_bytes = 0,
-            xray_base = 0,
-            active = 1
-
+        SET name = ?,
+            limit_bytes = ?,
+            expires_at = ?
         WHERE id = ?
-    """, (
-        user_id,
-    ))
+        """,
+        (
+            name or user["name"],
+            gb_to_bytes(limit_value),
+            expires_at,
+            user_id
+        )
+    )
 
     conn.commit()
     conn.close()
 
     restart_xray()
 
-    return redirect(
-        url_for("dashboard")
-    )
-
-
-# =========================================================
-# CONFIG
-# =========================================================
-
-@app.route(
-    "/users/<int:user_id>/config"
-)
-def user_config(user_id):
-
-    if "logged_in" not in session:
-
-        return jsonify({
-            "error": "Unauthorized"
-        }), 401
-
-    conn = db()
-
-    user = conn.execute(
-        "SELECT * FROM users WHERE id = ?",
-        (user_id,)
-    ).fetchone()
-
-    conn.close()
-
-    if not user:
-
-        return jsonify({
-            "error": "User not found"
-        }), 404
-
-    host = request.host.split(":")[0]
-
-    config = (
-        f"vless://{user['uuid']}@{host}:443"
-        f"?encryption=none"
-        f"&security=tls"
-        f"&type=ws"
-        f"&host={host}"
-        f"&path=%2Fxray-ws"
-        f"#{user['name']}"
-    )
-
-    return jsonify({
-
-        "name": user["name"],
-
-        "config": config
-
-    })
-
-
-# =========================================================
-# SUBSCRIBER PORTAL
-# =========================================================
-
-@app.route(
-    "/sub/<int:user_id>"
-)
-def subscriber_portal(user_id):
-
-    sync_usage()
-
-    conn = db()
-
-    user = conn.execute(
-        "SELECT * FROM users WHERE id = ?",
-        (user_id,)
-    ).fetchone()
-
-    conn.close()
-
-    if not user:
-
-        return "کاربر پیدا نشد", 404
-
-    data = dict(user)
-
-    data[
-        "limit_gb"
-    ] = user["limit_bytes"] / (
-        1024 ** 3
-    )
-
-    data[
-        "used_gb"
-    ] = user["used_bytes"] / (
-        1024 ** 3
-    )
-
-    data
+    return
