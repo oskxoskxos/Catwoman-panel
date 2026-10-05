@@ -11,26 +11,28 @@ from threading import Thread, Lock
 
 app = Flask(__name__)
 
-app.secret_key = "my-simple-secret-key"
+app.secret_key = "catwoman-panel-secret-key"
 
 USERNAME = "admin"
 PASSWORD = "admin123"
 
 DB_PATH = "/app/data/panel.db"
+
 XRAY_CONFIG = "/app/xray/config.json"
 XRAY_BINARY = "/usr/local/bin/xray/xray"
-
 XRAY_API = "127.0.0.1:10085"
+
 XRAY_PATH = "/xray-ws"
 
 xray_lock = Lock()
 
 
-# -------------------------------------------------
+# =========================================================
 # DATABASE
-# -------------------------------------------------
+# =========================================================
 
 def db():
+
     os.makedirs("/app/data", exist_ok=True)
 
     conn = sqlite3.connect(
@@ -50,52 +52,99 @@ def init_database():
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
+
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+
             name TEXT NOT NULL,
+
             uuid TEXT NOT NULL UNIQUE,
+
             limit_bytes INTEGER NOT NULL,
+
             used_bytes INTEGER NOT NULL DEFAULT 0,
+
             xray_base INTEGER NOT NULL DEFAULT 0,
+
             expires_at TEXT NOT NULL,
+
             active INTEGER NOT NULL DEFAULT 1,
+
             created_at TEXT NOT NULL
+
         )
     """)
 
     conn.commit()
-
-    count = conn.execute(
-        "SELECT COUNT(*) FROM users"
-    ).fetchone()[0]
-
-    if count == 0:
-
-        now = datetime.now(timezone.utc)
-
-        conn.execute("""
-            INSERT INTO users
-            (name, uuid, limit_bytes, used_bytes, xray_base,
-             expires_at, active, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            "کاربر اول",
-            "7f6c4e2a-1b9d-4a73-8c5e-2d1f6b9a4e30",
-            10 * 1024 * 1024 * 1024,
-            0,
-            0,
-            (now + timedelta(days=30)).isoformat(),
-            1,
-            now.isoformat()
-        ))
-
-        conn.commit()
-
     conn.close()
 
 
-# -------------------------------------------------
+# =========================================================
+# HELPERS
+# =========================================================
+
+def format_bytes(value):
+
+    value = float(value)
+
+    if value < 1024:
+        return f"{value:.0f} B"
+
+    if value < 1024 ** 2:
+        return f"{value / 1024:.2f} KB"
+
+    if value < 1024 ** 3:
+        return f"{value / (1024 ** 2):.2f} MB"
+
+    if value < 1024 ** 4:
+        return f"{value / (1024 ** 3):.2f} GB"
+
+    return f"{value / (1024 ** 4):.2f} TB"
+
+
+def calculate_percent(used, limit):
+
+    if limit <= 0:
+        return 0
+
+    percent = (
+        used / limit
+    ) * 100
+
+    return min(
+        100,
+        max(0, percent)
+    )
+
+
+def days_left(expires_at):
+
+    try:
+
+        expire = datetime.fromisoformat(
+            expires_at
+        )
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+        seconds = (
+            expire - now
+        ).total_seconds()
+
+        return max(
+            0,
+            int(seconds / 86400)
+        )
+
+    except Exception:
+
+        return 0
+
+
+# =========================================================
 # XRAY STATS
-# -------------------------------------------------
+# =========================================================
 
 def get_xray_stats():
 
@@ -116,19 +165,37 @@ def get_xray_stats():
         if result.returncode != 0:
             return {}
 
-        data = json.loads(result.stdout)
+        data = json.loads(
+            result.stdout
+        )
 
         stats = {}
 
-        for item in data.get("stat", []):
+        for item in data.get(
+            "stat",
+            []
+        ):
 
-            name = item.get("name", "")
-            value = int(item.get("value", 0))
+            name = item.get(
+                "name",
+                ""
+            )
 
-            if not name.startswith("user>>>"):
+            value = int(
+                item.get(
+                    "value",
+                    0
+                )
+            )
+
+            if not name.startswith(
+                "user>>>"
+            ):
                 continue
 
-            parts = name.split(">>>")
+            parts = name.split(
+                ">>>"
+            )
 
             if len(parts) != 4:
                 continue
@@ -137,16 +204,23 @@ def get_xray_stats():
             direction = parts[3]
 
             if email not in stats:
+
                 stats[email] = {
                     "uplink": 0,
                     "downlink": 0
                 }
 
             if direction == "uplink":
-                stats[email]["uplink"] = value
+
+                stats[email][
+                    "uplink"
+                ] = value
 
             elif direction == "downlink":
-                stats[email]["downlink"] = value
+
+                stats[email][
+                    "downlink"
+                ] = value
 
         return stats
 
@@ -159,14 +233,13 @@ def sync_usage():
 
     stats = get_xray_stats()
 
-    if not stats:
-        return
-
     conn = db()
 
     users = conn.execute(
         "SELECT * FROM users"
     ).fetchall()
+
+    changed = False
 
     for user in users:
 
@@ -185,25 +258,35 @@ def sync_usage():
             current["downlink"]
         )
 
-        base = user["xray_base"]
+        previous_base = user[
+            "xray_base"
+        ]
 
-        # اگر Xray ریست شده باشد
-        if current_total < base:
+        if current_total >= previous_base:
 
-            delta = current_total
+            delta = (
+                current_total -
+                previous_base
+            )
 
         else:
 
-            delta = current_total - base
+            # Xray stats reset شده
+            delta = current_total
 
         if delta > 0:
 
-            new_used = user["used_bytes"] + delta
+            new_used = (
+                user["used_bytes"] +
+                delta
+            )
 
             conn.execute("""
                 UPDATE users
+
                 SET used_bytes = ?,
                     xray_base = ?
+
                 WHERE id = ?
             """, (
                 new_used,
@@ -211,13 +294,18 @@ def sync_usage():
                 user["id"]
             ))
 
+            changed = True
+
     conn.commit()
+
     conn.close()
 
+    return changed
 
-# -------------------------------------------------
-# DISABLE EXPIRED / FULL USERS
-# -------------------------------------------------
+
+# =========================================================
+# LIMIT CHECK
+# =========================================================
 
 def check_limits():
 
@@ -225,34 +313,43 @@ def check_limits():
 
     conn = db()
 
-    users = conn.execute(
-        "SELECT * FROM users WHERE active = 1"
-    ).fetchall()
+    users = conn.execute("""
+        SELECT *
+        FROM users
+        WHERE active = 1
+    """).fetchall()
+
+    now = datetime.now(
+        timezone.utc
+    )
 
     changed = False
 
-    now = datetime.now(timezone.utc)
-
     for user in users:
 
-        expired = False
+        disable = False
 
-        if user["used_bytes"] >= user["limit_bytes"]:
-            expired = True
+        if user["used_bytes"] >= user[
+            "limit_bytes"
+        ]:
+
+            disable = True
 
         try:
 
-            expires_at = datetime.fromisoformat(
+            expires = datetime.fromisoformat(
                 user["expires_at"]
             )
 
-            if expires_at <= now:
-                expired = True
+            if expires <= now:
+
+                disable = True
 
         except Exception:
+
             pass
 
-        if expired:
+        if disable:
 
             conn.execute("""
                 UPDATE users
@@ -268,12 +365,13 @@ def check_limits():
     conn.close()
 
     if changed:
+
         restart_xray()
 
 
-# -------------------------------------------------
+# =========================================================
 # XRAY CONFIG
-# -------------------------------------------------
+# =========================================================
 
 def build_xray_config():
 
@@ -292,9 +390,14 @@ def build_xray_config():
     for user in users:
 
         clients.append({
+
             "id": user["uuid"],
+
             "level": 0,
-            "email": f"user-{user['id']}"
+
+            "email":
+                f"user-{user['id']}"
+
         })
 
     config = {
@@ -304,71 +407,97 @@ def build_xray_config():
         },
 
         "api": {
+
             "tag": "api",
+
             "services": [
                 "StatsService"
             ]
+
         },
 
         "stats": {},
 
         "policy": {
-            "levels": {
-                "0": {
-                    "handshake": 60,
-                    "connIdle": 300,
-                    "uplinkOnly": 1,
-                    "downlinkOnly": 1,
-                    "statsUserUplink": True,
-                    "statsUserDownlink": True,
-                    "statsUserOnline": True,
-                    "bufferSize": 4
-                }
-            },
 
-            "system": {
-                "statsInboundUplink": True,
-                "statsInboundDownlink": True,
-                "statsOutboundUplink": True,
-                "statsOutboundDownlink": True
+            "levels": {
+
+                "0": {
+
+                    "handshake": 60,
+
+                    "connIdle": 300,
+
+                    "uplinkOnly": 1,
+
+                    "downlinkOnly": 1,
+
+                    "statsUserUplink": True,
+
+                    "statsUserDownlink": True,
+
+                    "statsUserOnline": True,
+
+                    "bufferSize": 4
+
+                }
+
             }
+
         },
 
         "inbounds": [
 
             {
+
                 "listen": "127.0.0.1",
+
                 "port": 10000,
+
                 "protocol": "vless",
 
                 "settings": {
+
                     "clients": clients,
+
                     "decryption": "none"
+
                 },
 
                 "streamSettings": {
+
                     "network": "ws",
+
                     "security": "none",
 
                     "wsSettings": {
+
                         "path": XRAY_PATH
+
                     }
+
                 }
+
             },
 
             {
+
                 "listen": "127.0.0.1",
+
                 "port": 10085,
+
                 "protocol": "tunnel",
 
                 "settings": {
+
                     "services": [
                         "StatsService"
-                    ],
-                    "tag": "api"
+                    ]
+
                 },
 
                 "tag": "api"
+
             }
 
         ],
@@ -392,11 +521,15 @@ def build_xray_config():
             "rules": [
 
                 {
+
                     "type": "field",
+
                     "inboundTag": [
                         "api"
                     ],
+
                     "outboundTag": "api"
+
                 }
 
             ]
@@ -414,27 +547,14 @@ def build_xray_config():
         XRAY_CONFIG,
         "w",
         encoding="utf-8"
-    ) as f:
+    ) as file:
 
         json.dump(
             config,
-            f,
+            file,
             indent=2,
             ensure_ascii=False
         )
-
-
-def reset_xray_bases():
-
-    conn = db()
-
-    conn.execute("""
-        UPDATE users
-        SET xray_base = 0
-    """)
-
-    conn.commit()
-    conn.close()
 
 
 def restart_xray():
@@ -442,10 +562,7 @@ def restart_xray():
     with xray_lock:
 
         try:
-
-            # اول مصرف فعلی را ذخیره می‌کنیم
             sync_usage()
-
         except Exception:
             pass
 
@@ -459,10 +576,17 @@ def restart_xray():
 
             try:
 
-                with open(pid_file, "r") as f:
-                    old_pid = int(f.read().strip())
+                with open(
+                    pid_file,
+                    "r"
+                ) as file:
+
+                    old_pid = int(
+                        file.read().strip()
+                    )
 
             except Exception:
+
                 old_pid = None
 
         if old_pid:
@@ -475,6 +599,7 @@ def restart_xray():
                 )
 
             except Exception:
+
                 pass
 
             for _ in range(20):
@@ -486,9 +611,12 @@ def restart_xray():
                         0
                     )
 
-                    time.sleep(0.1)
+                    time.sleep(
+                        0.1
+                    )
 
                 except Exception:
+
                     break
 
         process = subprocess.Popen(
@@ -505,19 +633,29 @@ def restart_xray():
         with open(
             pid_file,
             "w"
-        ) as f:
+        ) as file:
 
-            f.write(
+            file.write(
                 str(process.pid)
             )
 
-        # چون Xray جدید از صفر شروع شده
-        reset_xray_bases()
+        # Xray جدید از صفر شروع می‌کند.
+        # بنابراین baseline جدید باید
+        # بعد از شروع Xray دوباره صفر باشد.
+        conn = db()
+
+        conn.execute("""
+            UPDATE users
+            SET xray_base = 0
+        """)
+
+        conn.commit()
+        conn.close()
 
 
-# -------------------------------------------------
-# BACKGROUND WORKER
-# -------------------------------------------------
+# =========================================================
+# BACKGROUND
+# =========================================================
 
 def background_worker():
 
@@ -533,14 +671,15 @@ def background_worker():
         time.sleep(15)
 
 
-# -------------------------------------------------
+# =========================================================
 # AUTH
-# -------------------------------------------------
+# =========================================================
 
 @app.route("/")
 def index():
 
     if "logged_in" not in session:
+
         return redirect(
             url_for("login")
         )
@@ -574,7 +713,9 @@ def login():
             password == PASSWORD
         ):
 
-            session["logged_in"] = True
+            session[
+                "logged_in"
+            ] = True
 
             return redirect(
                 url_for("dashboard")
@@ -590,19 +731,22 @@ def login():
     )
 
 
-# -------------------------------------------------
+# =========================================================
 # DASHBOARD
-# -------------------------------------------------
+# =========================================================
 
 @app.route("/dashboard")
 def dashboard():
 
     if "logged_in" not in session:
+
         return redirect(
             url_for("login")
         )
 
     check_limits()
+
+    sync_usage()
 
     conn = db()
 
@@ -614,16 +758,93 @@ def dashboard():
 
     conn.close()
 
+    user_list = []
+
+    for user in users:
+
+        item = dict(user)
+
+        item[
+            "limit_gb"
+        ] = user["limit_bytes"] / (
+            1024 ** 3
+        )
+
+        item[
+            "used_gb"
+        ] = user["used_bytes"] / (
+            1024 ** 3
+        )
+
+        item[
+            "remaining_bytes"
+        ] = max(
+            0,
+            user["limit_bytes"] -
+            user["used_bytes"]
+        )
+
+        item[
+            "remaining_gb"
+        ] = item[
+            "remaining_bytes"
+        ] / (
+            1024 ** 3
+        )
+
+        item[
+            "percent"
+        ] = calculate_percent(
+            user["used_bytes"],
+            user["limit_bytes"]
+        )
+
+        item[
+            "days_left"
+        ] = days_left(
+            user["expires_at"]
+        )
+
+        user_list.append(item)
+
     return render_template(
         "dashboard.html",
         username=USERNAME,
-        users=users
+        users=user_list
     )
 
 
-# -------------------------------------------------
+# =========================================================
+# SETTINGS
+# =========================================================
+
+@app.route("/settings")
+def settings():
+
+    if "logged_in" not in session:
+
+        return redirect(
+            url_for("login")
+        )
+
+    conn = db()
+
+    count = conn.execute(
+        "SELECT COUNT(*) FROM users"
+    ).fetchone()[0]
+
+    conn.close()
+
+    return render_template(
+        "settings.html",
+        username=USERNAME,
+        user_count=count
+    )
+
+
+# =========================================================
 # CREATE USER
-# -------------------------------------------------
+# =========================================================
 
 @app.route(
     "/users/create",
@@ -632,6 +853,7 @@ def dashboard():
 def create_user():
 
     if "logged_in" not in session:
+
         return redirect(
             url_for("login")
         )
@@ -641,7 +863,7 @@ def create_user():
         ""
     ).strip()
 
-    volume_gb = float(
+    volume = float(
         request.form.get(
             "volume",
             "10"
@@ -658,21 +880,21 @@ def create_user():
     if not name:
         name = "کاربر جدید"
 
-    if volume_gb <= 0:
-        volume_gb = 1
+    volume = max(
+        0.1,
+        volume
+    )
 
-    if days <= 0:
-        days = 1
-
-    user_uuid = str(
-        uuid.uuid4()
+    days = max(
+        1,
+        days
     )
 
     now = datetime.now(
         timezone.utc
     )
 
-    expires_at = (
+    expires = (
         now +
         timedelta(
             days=days
@@ -683,24 +905,41 @@ def create_user():
 
     conn.execute("""
         INSERT INTO users
-        (name, uuid, limit_bytes,
-         used_bytes, xray_base,
-         expires_at, active, created_at)
+        (
+            name,
+            uuid,
+            limit_bytes,
+            used_bytes,
+            xray_base,
+            expires_at,
+            active,
+            created_at
+        )
+
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
+
         name,
-        user_uuid,
+
+        str(uuid.uuid4()),
+
         int(
-            volume_gb *
+            volume *
             1024 *
             1024 *
             1024
         ),
+
         0,
+
         0,
-        expires_at.isoformat(),
+
+        expires.isoformat(),
+
         1,
+
         now.isoformat()
+
     ))
 
     conn.commit()
@@ -713,9 +952,9 @@ def create_user():
     )
 
 
-# -------------------------------------------------
+# =========================================================
 # EDIT USER
-# -------------------------------------------------
+# =========================================================
 
 @app.route(
     "/users/<int:user_id>/edit",
@@ -724,6 +963,7 @@ def create_user():
 def edit_user(user_id):
 
     if "logged_in" not in session:
+
         return redirect(
             url_for("login")
         )
@@ -733,7 +973,7 @@ def edit_user(user_id):
         ""
     ).strip()
 
-    volume_gb = float(
+    volume = float(
         request.form.get(
             "volume",
             "10"
@@ -754,52 +994,50 @@ def edit_user(user_id):
         )
     )
 
-    if volume_gb <= 0:
-        volume_gb = 1
+    volume = max(
+        0.1,
+        volume
+    )
 
-    if days <= 0:
-        days = 1
+    days = max(
+        1,
+        days
+    )
 
-    conn = db()
-
-    user = conn.execute(
-        "SELECT * FROM users WHERE id = ?",
-        (user_id,)
-    ).fetchone()
-
-    if not user:
-
-        conn.close()
-
-        return redirect(
-            url_for("dashboard")
-        )
-
-    # تعداد روز از همین لحظه محاسبه می‌شود
-    expires_at = (
+    expires = (
         datetime.now(timezone.utc)
         +
         timedelta(days=days)
     )
 
+    conn = db()
+
     conn.execute("""
         UPDATE users
+
         SET name = ?,
             limit_bytes = ?,
             expires_at = ?,
             active = ?
+
         WHERE id = ?
     """, (
+
         name,
+
         int(
-            volume_gb *
+            volume *
             1024 *
             1024 *
             1024
         ),
-        expires_at.isoformat(),
+
+        expires.isoformat(),
+
         active,
+
         user_id
+
     ))
 
     conn.commit()
@@ -812,9 +1050,9 @@ def edit_user(user_id):
     )
 
 
-# -------------------------------------------------
-# DELETE USER
-# -------------------------------------------------
+# =========================================================
+# DELETE
+# =========================================================
 
 @app.route(
     "/users/<int:user_id>/delete",
@@ -823,6 +1061,7 @@ def edit_user(user_id):
 def delete_user(user_id):
 
     if "logged_in" not in session:
+
         return redirect(
             url_for("login")
         )
@@ -846,9 +1085,9 @@ def delete_user(user_id):
     )
 
 
-# -------------------------------------------------
+# =========================================================
 # RESET USAGE
-# -------------------------------------------------
+# =========================================================
 
 @app.route(
     "/users/<int:user_id>/reset",
@@ -857,19 +1096,20 @@ def delete_user(user_id):
 def reset_usage(user_id):
 
     if "logged_in" not in session:
+
         return redirect(
             url_for("login")
         )
-
-    sync_usage()
 
     conn = db()
 
     conn.execute("""
         UPDATE users
+
         SET used_bytes = 0,
             xray_base = 0,
             active = 1
+
         WHERE id = ?
     """, (
         user_id,
@@ -885,9 +1125,9 @@ def reset_usage(user_id):
     )
 
 
-# -------------------------------------------------
-# GENERATE CONFIG
-# -------------------------------------------------
+# =========================================================
+# CONFIG
+# =========================================================
 
 @app.route(
     "/users/<int:user_id>/config"
@@ -899,8 +1139,6 @@ def user_config(user_id):
         return jsonify({
             "error": "Unauthorized"
         }), 401
-
-    check_limits()
 
     conn = db()
 
@@ -931,60 +1169,49 @@ def user_config(user_id):
 
     return jsonify({
 
-        "id": user["id"],
-
         "name": user["name"],
-
-        "uuid": user["uuid"],
 
         "config": config
 
     })
 
 
-# -------------------------------------------------
-# LOGOUT
-# -------------------------------------------------
+# =========================================================
+# SUBSCRIBER PORTAL
+# =========================================================
 
-@app.route("/logout")
-def logout():
-
-    session.clear()
-
-    return redirect(
-        url_for("login")
-    )
-
-
-# -------------------------------------------------
-# STARTUP
-# -------------------------------------------------
-
-init_database()
-
-try:
-    build_xray_config()
-except Exception:
-    pass
-
-worker = Thread(
-    target=background_worker,
-    daemon=True
+@app.route(
+    "/sub/<int:user_id>"
 )
+def subscriber_portal(user_id):
 
-worker.start()
+    sync_usage()
 
+    conn = db()
 
-if __name__ == "__main__":
+    user = conn.execute(
+        "SELECT * FROM users WHERE id = ?",
+        (user_id,)
+    ).fetchone()
 
-    port = int(
-        os.environ.get(
-            "PORT",
-            8080
-        )
+    conn.close()
+
+    if not user:
+
+        return "کاربر پیدا نشد", 404
+
+    data = dict(user)
+
+    data[
+        "limit_gb"
+    ] = user["limit_bytes"] / (
+        1024 ** 3
     )
 
-    app.run(
-        host="0.0.0.0",
-        port=port
-                )
+    data[
+        "used_gb"
+    ] = user["used_bytes"] / (
+        1024 ** 3
+    )
+
+    data
